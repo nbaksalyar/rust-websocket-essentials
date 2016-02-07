@@ -202,6 +202,30 @@ impl BufferedFrameReader {
         }
     }
 
+    fn read_payload<R: Read>(&mut self, input: &mut R) -> Result<Option<Frame>, ParseError> {
+        if let Ok(false) = read_exact(input, self.buf.get_mut(), self.frame_len.unwrap()) {
+            // Not enough bytes
+            return Ok(None);
+        }
+
+        // We have a complete frame now
+        let mut payload = self.buf.get_ref().clone();
+
+        if let Some(mask) = self.frame_mask {
+            Frame::apply_mask(mask, &mut payload);
+        }
+
+        // Get back to reading the next frame's header
+        self.state = FrameReaderState::ReadingHeader;
+        self.buf = Cursor::new(Vec::with_capacity(2));
+
+        Ok(Some(Frame {
+            header: self.frame_header.clone().unwrap(),
+            mask: self.frame_mask.clone(),
+            payload: payload.into_boxed_slice()
+        }))
+    }
+
     pub fn read<R: Read>(&mut self, input: &mut R) -> Result<Option<Frame>, ParseError> {
         loop {
             match self.state {
@@ -251,24 +275,9 @@ impl BufferedFrameReader {
                     }
                 },
                 FrameReaderState::ReadingPayload => {
-                    if let Ok(true) = read_exact(input, self.buf.get_mut(), self.frame_len.unwrap()) {
-                        // We have a complete frame now
-                        let mut payload = self.buf.get_ref().clone();
-
-                        if let Some(mask) = self.frame_mask {
-                            Frame::apply_mask(mask, &mut payload);
-                        }
-
-                        self.state = FrameReaderState::ReadingHeader;
-                        self.buf = Cursor::new(Vec::with_capacity(2));
-
-                        return Ok(Some(Frame {
-                            header: self.frame_header.clone().unwrap(),
-                            mask: self.frame_mask.clone(),
-                            payload: payload.into_boxed_slice()
-                        }))
-                    } else {
-                        break;
+                    match self.read_payload(input) {
+                        frame @ Ok(Some(..)) => return frame,
+                        _ => break
                     }
                 }
             }
