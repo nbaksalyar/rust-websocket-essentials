@@ -185,7 +185,7 @@ impl BufferedFrameReader {
         }
 
         match FrameHeader::parse(self.buf.read_u16::<BigEndian>().unwrap()) {
-            e @ Err(_) => e.map(|r| false),
+            e @ Err(_) => e.map(|_| false),
             Ok(header) => {
                 if header.payload_length < PAYLOAD_LEN_U16 {
                     self.frame_len = Some(header.payload_length as usize);
@@ -233,7 +233,7 @@ impl BufferedFrameReader {
                     match self.read_header(input) {
                         Ok(true) => {},
                         Ok(false) => break,
-                        err @ Err(_) => return err.map(|e| None)
+                        err @ Err(_) => return err.map(|_| None)
                     }
                 },
                 FrameReaderState::ReadingLength => {
