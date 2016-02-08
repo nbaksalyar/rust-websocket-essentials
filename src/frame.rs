@@ -4,6 +4,8 @@ use std::error::Error;
 
 use byteorder::{self, ReadBytesExt, WriteBytesExt, BigEndian};
 
+use StatusCode;
+
 pub const PAYLOAD_LEN_U16: u8 = 126;
 pub const PAYLOAD_LEN_U64: u8 = 127;
 
@@ -315,7 +317,13 @@ impl<'a> From<&'a str> for Frame {
 }
 
 impl Frame {
-    pub fn close(status_code: u16, reason: &[u8]) -> Result<Frame, ParseError> {
+    pub fn close(status: StatusCode) -> Frame {
+        let reason: &str = From::from(status.clone());
+        let status_code: u16 = From::from(status);
+        Self::close_custom(status_code, reason.as_bytes()).unwrap()
+    }
+
+    pub fn close_custom(status_code: u16, reason: &[u8]) -> Result<Frame, ParseError> {
         let body = Vec::with_capacity(2 + reason.len());
 
         let mut body_cursor = Cursor::new(body);
@@ -437,8 +445,10 @@ impl Frame {
 }
 
 mod test {
-    use super::*;
     use std::io::Cursor;
+
+    use super::*;
+    use StatusCode;
 
     #[test]
     fn opcode_numbers() {
@@ -453,6 +463,17 @@ mod test {
         assert_eq!(FrameHeader::determine_len(2000), PAYLOAD_LEN_U16);
         assert_eq!(FrameHeader::determine_len(65535), PAYLOAD_LEN_U16);
         assert_eq!(FrameHeader::determine_len(65537), PAYLOAD_LEN_U64);
+    }
+
+    #[test]
+    fn create_close_frame_from_status() {
+        let f = Frame::close(StatusCode::InternalServerError);
+        assert_eq!(f.header.opcode, OpCode::ConnectionClose);
+        assert_eq!(&*f.payload, b"\x03\xF3Internal Server Error");
+
+        let f = Frame::close(StatusCode::NormalClosure);
+        assert_eq!(f.header.opcode, OpCode::ConnectionClose);
+        assert_eq!(&*f.payload, b"\x03\xE8Normal Closure");
     }
 
     #[test]
