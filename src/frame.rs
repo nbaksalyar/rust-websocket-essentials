@@ -508,6 +508,18 @@ mod test {
     }
 
     #[test]
+    fn buffered_read_masked_frame() {
+        let read_result = BufferedFrameReader::new().read(&mut Cursor::new(b"\x81\x82\x01\x02\x03\x04\x69\x6b"));
+        assert!(read_result.is_ok());
+
+        let fr = read_result.unwrap().unwrap();
+
+        assert_eq!(fr.header.masked, true);
+        assert_eq!(fr.header.payload_length, 2);
+        assert_eq!(&*fr.payload, b"hi");
+    }
+
+    #[test]
     fn buffered_read_partial() {
         let mut frame_reader = BufferedFrameReader::new();
 
