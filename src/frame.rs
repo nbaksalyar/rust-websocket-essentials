@@ -104,7 +104,7 @@ impl FrameHeader {
     fn determine_len(len: usize) -> u8 {
         if len < (PAYLOAD_LEN_U16 as usize) {
             len as u8
-        } else if len < (u16::MAX as usize) {
+        } else if len <= (u16::MAX as usize) {
             PAYLOAD_LEN_U16
         } else {
             PAYLOAD_LEN_U64
@@ -451,6 +451,7 @@ mod test {
     fn determine_header_len() {
         assert_eq!(FrameHeader::determine_len(42), 42);
         assert_eq!(FrameHeader::determine_len(2000), PAYLOAD_LEN_U16);
+        assert_eq!(FrameHeader::determine_len(65535), PAYLOAD_LEN_U16);
         assert_eq!(FrameHeader::determine_len(65537), PAYLOAD_LEN_U64);
     }
 
