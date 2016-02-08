@@ -339,8 +339,11 @@ impl Frame {
         })
     }
 
-    pub fn close_from(recv_frame: &Frame) -> Frame {
-        let body = if recv_frame.payload.len() > 0 {
+    pub fn close_from(recv_frame: &Frame) -> Result<Frame, ParseError> {
+        let body = if recv_frame.header.payload_length >= 2 {
+            if recv_frame.payload.len() < 2 {
+                return Err(ParseError::UnexpectedEof);
+            }
             let status_code = &recv_frame.payload[0..2];
             let mut body = Vec::with_capacity(2);
             body.write(status_code).unwrap();
@@ -348,11 +351,11 @@ impl Frame {
         } else {
             Vec::new()
         };
-        Frame {
+        Ok(Frame {
             header: FrameHeader::new(body.len(), OpCode::ConnectionClose),
             payload: body.into_boxed_slice(),
             mask: None
-        }
+        })
     }
 
     pub fn pong(ping_frame: &Frame) -> Frame {
@@ -476,6 +479,24 @@ mod test {
         let f = Frame::close(StatusCode::NormalClosure);
         assert_eq!(f.header.opcode, OpCode::ConnectionClose);
         assert_eq!(&*f.payload, b"\x03\xE8Normal Closure");
+    }
+
+    #[test]
+    fn create_close_frame_from_other_frame() {
+        let f = Frame::close_from(&Frame {
+            header: FrameHeader::new(2, OpCode::ConnectionClose),
+            payload: Box::new(*b"\x03"),
+            mask: None,
+        });
+        assert!(f.is_err());
+
+        let f = Frame::close_from(&Frame {
+            header: FrameHeader::new(0, OpCode::ConnectionClose),
+            payload: Box::new(*b""),
+            mask: None,
+        }).unwrap();
+        assert_eq!(f.header.opcode, OpCode::ConnectionClose);
+        assert_eq!(f.payload.len(), 0);
     }
 
     #[test]
