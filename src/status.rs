@@ -12,6 +12,27 @@ pub enum StatusCode {
     MandatoryExt,
     InternalServerError,
     TlsHandshake,
+    Custom(u16),
+}
+
+impl From<u16> for StatusCode {
+    fn from(status: u16) -> StatusCode {
+        match status {
+            1000 => StatusCode::NormalClosure,
+            1001 => StatusCode::GoingAway,
+            1002 => StatusCode::ProtocolError,
+            1003 => StatusCode::UnsupportedData,
+            1005 => StatusCode::NoStatusRcvd,
+            1006 => StatusCode::AbnormalClosure,
+            1007 => StatusCode::InvalidFramePayloadData,
+            1008 => StatusCode::PolicyViolation,
+            1009 => StatusCode::MessageTooBig,
+            1010 => StatusCode::MandatoryExt,
+            1011 => StatusCode::InternalServerError,
+            1015 => StatusCode::TlsHandshake,
+            code => StatusCode::Custom(code),
+        }
+    }
 }
 
 impl From<StatusCode> for u16 {
@@ -29,6 +50,7 @@ impl From<StatusCode> for u16 {
             StatusCode::MandatoryExt => 1010,
             StatusCode::InternalServerError => 1011,
             StatusCode::TlsHandshake => 1015,
+            StatusCode::Custom(code) => code,
         }
     }
 }
@@ -48,6 +70,7 @@ impl<'a> From<StatusCode> for &'a str {
             StatusCode::MandatoryExt => "Mandatory Ext.",
             StatusCode::InternalServerError => "Internal Server Error",
             StatusCode::TlsHandshake => "TLS handshake",
+            StatusCode::Custom(..) => "",
         }
     }
 }
