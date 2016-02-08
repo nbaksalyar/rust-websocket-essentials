@@ -186,7 +186,9 @@ impl BufferedFrameReader {
             return Ok(false)
         }
 
-        match FrameHeader::parse(self.buf.read_u16::<BigEndian>().unwrap()) {
+        let header = try!(self.buf.read_u16::<BigEndian>());
+
+        match FrameHeader::parse(header) {
             e @ Err(_) => e.map(|_| false),
             Ok(header) => {
                 if header.payload_length < PAYLOAD_LEN_U16 {
