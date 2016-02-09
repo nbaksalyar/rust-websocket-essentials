@@ -319,6 +319,10 @@ impl Frame {
         &self.payload
     }
 
+    pub fn into_vec(self) -> Vec<u8> {
+        self.payload
+    }
+
     pub fn close(status: StatusCode) -> Frame {
         let reason: &str = From::from(status.clone());
         let status_code: u16 = From::from(status);
