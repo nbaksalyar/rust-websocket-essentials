@@ -1,13 +1,16 @@
-use std::{iter, fmt, cmp, error, u16};
+use std::{fmt, error, u16};
 use std::io::{self, Read, Write, Cursor};
 use std::error::Error;
+use std::mem;
 
-use byteorder::{self, ReadBytesExt, WriteBytesExt, BigEndian};
+use byteorder::{self, ReadBytesExt, WriteBytesExt, BigEndian, ByteOrder};
 
 use StatusCode;
 
 pub const PAYLOAD_LEN_U16: u8 = 126;
 pub const PAYLOAD_LEN_U64: u8 = 127;
+
+const MASK_LEN: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
@@ -156,16 +159,14 @@ enum FrameReaderState {
 
 pub struct BufferedFrameReader {
     state: FrameReaderState,
+    buf: Vec<u8>,
     frame_header: Option<FrameHeader>,
     frame_len: Option<usize>,
-    frame_mask: Option<[u8; 4]>,
-    buf: Cursor<Vec<u8>>
+    frame_mask: Option<[u8; 4]>
 }
 
-fn read_exact<R: Read>(input: &mut R, mut buf: &mut Vec<u8>, len: usize) -> io::Result<bool> {
-    let to_read = cmp::min(len - buf.len(), len);
-    let mut chunk = input.take(to_read as u64);
-    let read_bytes = try!(chunk.read_to_end(&mut buf));
+fn fill_buf<R: Read>(input: &mut R, mut buf: &mut Vec<u8>, len: usize) -> io::Result<bool> {
+    try!(io::copy(&mut input.take((len - buf.len()) as u64), buf));
     return Ok(buf.len() >= len);
 }
 
@@ -173,32 +174,35 @@ impl BufferedFrameReader {
     pub fn new() -> BufferedFrameReader {
         BufferedFrameReader {
             state: FrameReaderState::ReadingHeader,
+            buf: Vec::with_capacity(2),
             frame_header: None,
             frame_len: None,
-            frame_mask: None,
-            buf: Cursor::new(Vec::with_capacity(2048))
+            frame_mask: None
         }
     }
 
     fn read_header<R: Read>(&mut self, input: &mut R) -> Result<bool, ParseError> {
-        if let Ok(false) = read_exact(input, self.buf.get_mut(), 2) {
+        if let Ok(false) = fill_buf(input, &mut self.buf, 2) {
             // Not enough bytes
             return Ok(false)
         }
 
-        let header = try!(self.buf.read_u16::<BigEndian>());
+        let buf = mem::replace(&mut self.buf, Vec::new());
+        let header = BigEndian::read_u16(&*buf);
 
         match FrameHeader::parse(header) {
             e @ Err(_) => e.map(|_| false),
             Ok(header) => {
                 if header.payload_length < PAYLOAD_LEN_U16 {
                     self.frame_len = Some(header.payload_length as usize);
+
                     self.state = FrameReaderState::ReadingMask;
-                    self.buf = Cursor::new(Vec::with_capacity(4));
+                    self.buf.reserve(MASK_LEN);
                 } else {
                     self.state = FrameReaderState::ReadingLength;
-                    self.buf = Cursor::new(Vec::with_capacity(8));
+                    self.buf.reserve(mem::size_of::<u64>());
                 };
+
                 self.frame_header = Some(header);
 
                 Ok(true)
@@ -207,26 +211,23 @@ impl BufferedFrameReader {
     }
 
     fn read_payload<R: Read>(&mut self, input: &mut R) -> Result<Option<Frame>, ParseError> {
-        if let Ok(false) = read_exact(input, self.buf.get_mut(), self.frame_len.unwrap()) {
+        if let Ok(false) = fill_buf(input, &mut self.buf, self.frame_len.unwrap()) {
             // Not enough bytes
             return Ok(None);
         }
 
-        // We have a complete frame now
-        let mut payload = self.buf.get_ref().clone();
+        // We have a complete frame now, so return state to reading a next frame's header
+        let mut buf = mem::replace(&mut self.buf, Vec::with_capacity(2));
+        self.state = FrameReaderState::ReadingHeader;
 
         if let Some(mask) = self.frame_mask {
-            Frame::apply_mask(mask, &mut payload);
+            Frame::apply_mask(mask, &mut buf);
         }
-
-        // Get back to reading the next frame's header
-        self.state = FrameReaderState::ReadingHeader;
-        self.buf = Cursor::new(Vec::with_capacity(2));
 
         Ok(Some(Frame {
             header: self.frame_header.clone().unwrap(),
             mask: self.frame_mask.clone(),
-            payload: payload.into_boxed_slice()
+            payload: buf
         }))
     }
 
@@ -241,39 +242,34 @@ impl BufferedFrameReader {
                     }
                 },
                 FrameReaderState::ReadingLength => {
-                    let (size, payload_len) = if let Some(ref header) = self.frame_header {
-                        match header.payload_length {
-                            PAYLOAD_LEN_U16 => (2, header.payload_length),
-                            PAYLOAD_LEN_U64 => (8, header.payload_length),
-                            _ => unreachable!()
-                        }
-                    } else {
-                        unreachable!()
+                    let len = match self.frame_header.as_ref().unwrap().payload_length {
+                        PAYLOAD_LEN_U16 => mem::size_of::<u16>(),
+                        PAYLOAD_LEN_U64 => mem::size_of::<u64>(),
+                        _ => unreachable!()
                     };
 
-                    if let Ok(true) = read_exact(input, self.buf.get_mut(), size) {
-                        self.frame_len = Some(Frame::read_length(payload_len, &mut self.buf).unwrap());
+                    if let Ok(true) = fill_buf(input, &mut self.buf, len) {
+                        let buf = mem::replace(&mut self.buf, Vec::with_capacity(MASK_LEN));
+
                         self.state = FrameReaderState::ReadingMask;
-                        self.buf = Cursor::new(Vec::with_capacity(4));
+                        self.frame_len = Some(Frame::read_length(self.frame_header.as_ref().unwrap().payload_length, &buf));
                     } else {
                         break;
                     }
                 },
                 FrameReaderState::ReadingMask => {
                     let header = self.frame_header.as_ref().unwrap();
+
                     if !header.masked {
                         self.state = FrameReaderState::ReadingPayload;
-                        self.buf = Cursor::new(Vec::with_capacity(self.frame_len.unwrap()));
+                        self.buf = Vec::with_capacity(self.frame_len.unwrap());
                         continue;
                     }
 
-                    if let Ok(true) = read_exact(input, self.buf.get_mut(), 4) {
-                        self.frame_mask = Some({
-                            let mask_buf = &self.buf.get_ref()[0..4];
-                            [mask_buf[0], mask_buf[1], mask_buf[2], mask_buf[3]]
-                        });
+                    if let Ok(true) = fill_buf(input, &mut self.buf, 4) {
+                        let buf = mem::replace(&mut self.buf, Vec::with_capacity(self.frame_len.unwrap()));
+                        self.frame_mask = Some([buf[0], buf[1], buf[2], buf[3]]);
                         self.state = FrameReaderState::ReadingPayload;
-                        self.buf = Cursor::new(Vec::with_capacity(self.frame_len.unwrap()));
                     } else {
                         break;
                     }
@@ -295,14 +291,14 @@ impl BufferedFrameReader {
 pub struct Frame {
     header: FrameHeader,
     mask: Option<[u8; 4]>,
-    pub payload: Box<[u8]>
+    payload: Vec<u8>
 }
 
 impl<'a> From<&'a [u8]> for Frame {
     fn from(payload: &[u8]) -> Frame {
         Frame {
             header: FrameHeader::new(payload.len(), OpCode::BinaryFrame),
-            payload: payload.to_owned().into_boxed_slice(),
+            payload: payload.to_owned(),
             mask: None
         }
     }
@@ -312,13 +308,17 @@ impl<'a> From<&'a str> for Frame {
     fn from(payload: &str) -> Frame {
         Frame {
             header: FrameHeader::new(payload.len(), OpCode::TextFrame),
-            payload: payload.to_owned().into_bytes().into_boxed_slice(),
+            payload: payload.as_bytes().to_owned(),
             mask: None
         }
     }
 }
 
 impl Frame {
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
     pub fn close(status: StatusCode) -> Frame {
         let reason: &str = From::from(status.clone());
         let status_code: u16 = From::from(status);
@@ -326,15 +326,15 @@ impl Frame {
     }
 
     pub fn close_custom(status_code: u16, reason: &[u8]) -> Result<Frame, ParseError> {
-        let body = Vec::with_capacity(2 + reason.len());
+        let len = 2 + reason.len();
+        let mut body = Cursor::new(Vec::with_capacity(len));
 
-        let mut body_cursor = Cursor::new(body);
-        try!(body_cursor.write_u16::<BigEndian>(status_code));
-        try!(body_cursor.write(reason));
+        try!(body.write_u16::<BigEndian>(status_code));
+        try!(body.write(reason));
 
         Ok(Frame {
-            header: FrameHeader::new(body_cursor.get_ref().len(), OpCode::ConnectionClose),
-            payload: body_cursor.into_inner().into_boxed_slice(),
+            header: FrameHeader::new(len, OpCode::ConnectionClose),
+            payload: body.into_inner(),
             mask: None
         })
     }
@@ -345,15 +345,16 @@ impl Frame {
                 return Err(ParseError::UnexpectedEof);
             }
             let status_code = &recv_frame.payload[0..2];
+
             let mut body = Vec::with_capacity(2);
-            body.write(status_code).unwrap();
+            body.write(status_code);
             body
         } else {
             Vec::new()
         };
         Ok(Frame {
             header: FrameHeader::new(body.len(), OpCode::ConnectionClose),
-            payload: body.into_boxed_slice(),
+            payload: body,
             mask: None
         })
     }
@@ -367,10 +368,10 @@ impl Frame {
         }
     }
 
-    pub fn ping(payload: Box<[u8]>) -> Frame {
+    pub fn ping(payload: &[u8]) -> Frame {
         Frame {
             header: FrameHeader::new(4, OpCode::Ping),
-            payload: payload,
+            payload: payload.to_owned(),
             mask: None
         }
     }
@@ -389,30 +390,6 @@ impl Frame {
         Ok(())
     }
 
-    pub fn read<R: Read>(input: &mut R) -> Result<Frame, ParseError> {
-        let buf = try!(input.read_u16::<BigEndian>());
-        let header = try!(FrameHeader::parse(buf));
-
-        let len = try!(Self::read_length(header.payload_length, input));
-        let mask_key = if header.masked {
-            let mask = try!(Self::read_mask(input));
-            Some(mask)
-        } else {
-            None
-        };
-        let mut payload = try!(Self::read_payload(len, input));
-
-        if let Some(mask) = mask_key {
-            Self::apply_mask(mask, &mut payload);
-        }
-
-        Ok(Frame {
-            header: header,
-            payload: payload,
-            mask: mask_key
-        })
-    }
-
     pub fn get_opcode(&self) -> OpCode {
         self.header.opcode.clone()
     }
@@ -427,24 +404,11 @@ impl Frame {
         }
     }
 
-    fn read_mask<R: Read>(input: &mut R) -> io::Result<[u8; 4]> {
-        let mut buf = [0; 4];
-        try!(input.read(&mut buf));
-        Ok(buf)
-    }
-
-    fn read_payload<R: Read>(payload_len: usize, input: &mut R) -> io::Result<Box<[u8]>> {
-        let mut payload: Vec<u8> = Vec::with_capacity(payload_len);
-        payload.extend(iter::repeat(0).take(payload_len));
-        try!(input.read(&mut payload));
-        Ok(payload.into_boxed_slice())
-    }
-
-    fn read_length<R: Read>(payload_len: u8, input: &mut R) -> io::Result<usize> {
+    fn read_length(payload_len: u8, input: &[u8]) -> usize {
         return match payload_len {
-            PAYLOAD_LEN_U64 => input.read_u64::<BigEndian>().map(|v| v as usize).map_err(From::from),
-            PAYLOAD_LEN_U16 => input.read_u16::<BigEndian>().map(|v| v as usize).map_err(From::from),
-            _ => Ok(payload_len as usize) // payload_len < 127
+            PAYLOAD_LEN_U64 => BigEndian::read_u64(input) as usize,
+            PAYLOAD_LEN_U16 => BigEndian::read_u16(input) as usize,
+            _ => payload_len as usize // payload_len < 127
         }
     }
 }
@@ -474,29 +438,29 @@ mod test {
     fn create_close_frame_from_status() {
         let f = Frame::close(StatusCode::InternalServerError);
         assert_eq!(f.header.opcode, OpCode::ConnectionClose);
-        assert_eq!(&*f.payload, b"\x03\xF3Internal Server Error");
+        assert_eq!(f.payload(), b"\x03\xF3Internal Server Error");
 
         let f = Frame::close(StatusCode::NormalClosure);
         assert_eq!(f.header.opcode, OpCode::ConnectionClose);
-        assert_eq!(&*f.payload, b"\x03\xE8Normal Closure");
+        assert_eq!(f.payload(), b"\x03\xE8Normal Closure");
     }
 
     #[test]
     fn create_close_frame_from_other_frame() {
         let f = Frame::close_from(&Frame {
             header: FrameHeader::new(2, OpCode::ConnectionClose),
-            payload: Box::new(*b"\x03"),
+            payload: vec![0x03],
             mask: None,
         });
         assert!(f.is_err());
 
         let f = Frame::close_from(&Frame {
             header: FrameHeader::new(0, OpCode::ConnectionClose),
-            payload: Box::new(*b""),
+            payload: Vec::new(),
             mask: None,
         }).unwrap();
         assert_eq!(f.header.opcode, OpCode::ConnectionClose);
-        assert_eq!(f.payload.len(), 0);
+        assert_eq!(f.payload().len(), 0);
     }
 
     #[test]
@@ -531,15 +495,6 @@ mod test {
     }
 
     #[test]
-    fn frame_read() {
-        let fr = Frame::read(&mut Cursor::new(b"\x81\x05hello")).unwrap();
-
-        assert_eq!(fr.get_opcode(), OpCode::TextFrame);
-        assert_eq!(fr.header.payload_length, 5);
-        assert_eq!(&*fr.payload, b"hello");
-    }
-
-    #[test]
     fn buffered_read_frame() {
         let mut frame_reader = BufferedFrameReader::new();
 
@@ -549,7 +504,7 @@ mod test {
         let fr = read_result.unwrap().unwrap();
         assert_eq!(fr.get_opcode(), OpCode::TextFrame);
         assert_eq!(fr.header.payload_length, 5);
-        assert_eq!(&*fr.payload, b"hello");
+        assert_eq!(fr.payload(), b"hello");
     }
 
     #[test]
@@ -561,7 +516,7 @@ mod test {
 
         assert_eq!(fr.header.masked, true);
         assert_eq!(fr.header.payload_length, 2);
-        assert_eq!(&*fr.payload, b"hi");
+        assert_eq!(fr.payload(), b"hi");
     }
 
     #[test]
