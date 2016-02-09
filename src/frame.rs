@@ -314,6 +314,26 @@ impl<'a> From<&'a str> for Frame {
     }
 }
 
+impl From<String> for Frame {
+    fn from(payload: String) -> Frame {
+        Frame {
+            header: FrameHeader::new(payload.len(), OpCode::TextFrame),
+            payload: payload.into_bytes(),
+            mask: None
+        }
+    }
+}
+
+impl From<Vec<u8>> for Frame {
+    fn from(payload: Vec<u8>) -> Frame {
+        Frame {
+            header: FrameHeader::new(payload.len(), OpCode::BinaryFrame),
+            payload: payload,
+            mask: None
+        }
+    }
+}
+
 impl Frame {
     pub fn payload(&self) -> &[u8] {
         &self.payload
