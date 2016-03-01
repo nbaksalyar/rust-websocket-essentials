@@ -422,6 +422,14 @@ impl Frame {
         self.header.opcode == OpCode::ConnectionClose
     }
 
+    pub fn is_fin(&self) -> bool {
+        self.header.fin
+    }
+
+    pub fn get_rsv_flags(&self) -> (bool, bool, bool) {
+        (self.header.rsv1, self.header.rsv2, self.header.rsv3)
+    }
+
     fn apply_mask(mask: [u8; 4], bytes: &mut [u8]) {
         for (idx, c) in bytes.iter_mut().enumerate() {
             *c = *c ^ mask[idx % 4];
